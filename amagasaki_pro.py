@@ -1,38 +1,45 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="尼崎GANRIKI 3連単", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="尼崎GANRIKI 解析エンジン", page_icon="🎯", layout="wide")
 st.title("🎯 GANRIKI 3連単・ガチ勝負")
 
-# 自動取得気象
+# 気象情報
 weather = {"風向": "追い風", "風速": 2.0} 
 st.info(f"🛰️ 現在の尼崎：{weather['風向']} {weather['風速']}m")
 
-# データ入力：階級を選択式に改善
+# 手動入力：表形式で数字を入力し、階級だけ選択式にする
 st.subheader("📋 選手データ入力")
 
 # 階級の選択肢
 class_options = ["A1", "A2", "B1", "B2"]
 
-# 手動入力用の空データフレーム
-df_data = []
-for i in range(1, 7):
-    # 行ごとに階級を選択式で作成
-    row = {
-        "艇番": i,
-        "階級": st.sidebar.selectbox(f"{i}号艇 階級", class_options, key=f"class_{i}", index=2),
-        "モーター": st.sidebar.number_input(f"{i}号艇 モーター率", 0.0, 100.0, 30.0, key=f"mot_{i}"),
-        "ボート": st.sidebar.number_input(f"{i}号艇 ボート率", 0.0, 100.0, 30.0, key=f"boa_{i}"),
-        "結果": st.sidebar.number_input(f"{i}号艇 着順", 0, 6, 0, key=f"res_{i}")
-    }
-    df_data.append(row)
+# 入力用データフレームの初期化
+if 'df' not in st.session_state:
+    st.session_state.df = pd.DataFrame({
+        "艇番": [1, 2, 3, 4, 5, 6],
+        "階級": ["B1"]*6,
+        "モーター": [30.0]*6,
+        "ボート": [30.0]*6,
+        "結果(着順)": [0]*6
+    })
 
-df = pd.DataFrame(df_data)
-st.table(df.drop(columns=["結果"])) # 入力確認用の表
+# 階級の更新用UI（6つのセレクトボックス）
+col1, col2, col3, col4, col5, col6 = st.columns(6)
+cols = [col1, col2, col3, col4, col5, col6]
+for i in range(6):
+    st.session_state.df.at[i, "階級"] = cols[i].selectbox(f"{i+1}号艇", class_options, key=f"c{i}")
+
+# 数字入力（表形式）
+st.session_state.df[["モーター", "ボート", "結果(着順)"]] = st.data_editor(
+    st.session_state.df[["モーター", "ボート", "結果(着順)"]], 
+    hide_index=True
+)
 
 if st.button("🚀 3連単を算出"):
     # スコア計算
     class_pts = {"A1": 40, "A2": 30, "B1": 20, "B2": 10}
+    df = st.session_state.df
     df["S"] = (
         df["階級"].map(class_pts) + 
         (df["モーター"] * 0.4) + 
@@ -48,17 +55,8 @@ if st.button("🚀 3連単を算出"):
     
     st.markdown("---")
     
-    # 本線・中穴・大穴
-    cols = st.columns(3)
-    with cols[0]:
-        st.subheader("✅ 本線")
-        st.metric("3連単", f"{t1}-{t2}-{t3}")
-        st.write(f"理由: {t1}号艇の総合指数が最強であり、今の追い風条件で鉄板の構成。")
-    with cols[1]:
-        st.subheader("⚡ 中穴")
-        st.metric("3連単", f"{t1}-{t3}-{t2}")
-        st.write(f"理由: {t3}号艇の機力が伸びており、{t2}号艇との入れ替わりを想定。")
-    with cols[2]:
-        st.subheader("🌋 大穴")
-        st.metric("3連単", f"{t2}-{t1}-{t4}")
-        st.write(f"理由: {t1}号艇のスタート後手に乗じて、{t2}号艇の差し抜けを狙う荒れる展開。")
+    # 買い目表示
+    c1, c2, c3 = st.columns(3)
+    c1.subheader("✅ 本線"); c1.metric("3連単", f"{t1}-{t2}-{t3}"); c1.write("理由: 総合指数トップ。追い風でイン鉄板。")
+    c2.subheader("⚡ 中穴"); c2.metric("3連単", f"{t1}-{t3}-{t2}"); c2.write("理由: モーター機力重視の差しパターン。")
+    c3.subheader("🌋 大穴"); c3.metric("3連単", f"{t2}-{t1}-{t4}"); c3.write("理由: インのスタート遅れを想定した大逆転。")
