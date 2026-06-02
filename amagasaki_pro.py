@@ -29,15 +29,14 @@ date_str = today.strftime("%Y年%m月%d日")
 
 st.title("🎯 尼崎特化型 リアルタイム予測 GANRIKI")
 st.subheader(f"📅 開催日: {date_str}")
-st.caption("【完全自動】スペース・文字ズレ完全克服最終モデル")
+st.caption("【完全自動】場別ファイル名ダイレクト認識モデル")
 st.markdown("---")
 
-# --- 🛰️ 公式ZIPダウンロード処理 ---
+# --- 🛰️ 尼崎のファイルだけをZIPから引っこ抜く処理 ---
 @st.cache_data(ttl=1800)
-def get_official_dataset(target_date):
-    """公式HPからZIPを落とし、中のファイルを確実に全結合してテキスト化する"""
+def get_amagasaki_txt_from_zip(target_date):
+    """公式ZIPをダウンロードし、ファイル名に『09（尼崎）』が含まれるテキストだけを抽出する"""
     url = f"https://www.boatrace.jp/owpc/pc/extra/data/program/b{target_date}.zip"
-    combined_text = ""
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
@@ -45,69 +44,76 @@ def get_official_dataset(target_date):
         
         with zipfile.ZipFile(io.BytesIO(res.content)) as z:
             for filename in z.namelist():
-                with z.open(filename) as f:
-                    combined_text += f.read().decode('cp932', errors='ignore') + "\n"
-        return combined_text
+                # 💡ファイル名に '09' (尼崎の場コード) が入っているものを狙い撃ち
+                if "09" in filename and filename.endswith(".txt"):
+                    with z.open(filename) as f:
+                        return f.read().decode('cp932', errors='ignore')
+                        
+            # もし場別ファイルがなければ、まとめファイル(p*.txtやb*.txt)から中身を返すバックアップ
+            for filename in z.namelist():
+                if filename.endswith(".txt"):
+                    with z.open(filename) as f:
+                        txt = f.read().decode('cp932', errors='ignore')
+                        if "尼崎" in txt or "09#" in txt:
+                            return txt
     except:
         return None
+    return None
 
-def parse_amagasaki_by_pattern(raw_text, target_race):
-    """不規則な全角半角スペースを完全に無効化してデータをぶち抜く"""
+def parse_race_data(raw_text, target_race):
+    """尼崎のテキストから指定レースの6名を確実に抽出する"""
     if not raw_text:
         return None
         
     lines = raw_text.split('\n')
     racer_list = []
+    race_found = False
+    boat_count = 0
     
-    is_amagasaki = False
-    current_race = None
+    # レース番号（例: "11R" や " 1R"）の正規表現
+    race_pattern = re.compile(r'^\s*(' + str(target_race) + r')\s*R')
     
     for line in lines:
-        clean_line = line.replace('\r', '').strip()
-        if not clean_line:
+        clean_line = line.replace('\r', '')
+        if not clean_line.strip():
             continue
             
-        # 尼崎セクション（09#）の検知
-        if "09#" in clean_line:
-            is_amagasaki = True
+        # 対象レースの開始を検知
+        if race_pattern.search(clean_line):
+            race_found = True
+            boat_count = 0
+            racer_list = []
             continue
-        # 別の場（10#など）が始まったら尼崎終了
-        if is_amagasaki and "#" in clean_line and "09#" not in clean_line:
-            is_amagasaki = False
-            break
             
-        if is_amagasaki:
-            # レース番号（例: 11R や 1R）の検知
-            race_match = re.search(r'^\s*(\d+)\s*R', clean_line)
-            if race_match:
-                current_race = int(race_match.group(1))
-                continue
+        if race_found:
+            # 次のレース番号が来たら現在のレース解析は終了
+            if re.search(r'^\s*\d+\s*R', clean_line):
+                race_found = False
+                break
                 
-            if current_race != target_race:
-                continue
-                
-            # 💡【最終解】全角・半角スペースがどれだけ暴れても、文字の「パターン」だけで狙い撃ち
-            # 先頭が艇番(1-6) → 任意の空白 → 4桁の登録番号 → 空白 → 選手名 → 空白 → 階級(A1-B2)
-            boat_match = re.search(r'^([1-6])\s*(\d{4})\s*([^\sA-B]+)\s*(A1|A2|B1|B2)', clean_line)
-            if boat_match:
+            # 艇番(1-6)から始まる選手行をキャッチ
+            # [艇番] [4桁の登録番号] [選手名] [階級] の並び
+            boat_match = re.search(r'^\s*([1-6])\s*(\d{4})?\s*([^\sA-B0-9]+)\s*(A1|A2|B1|B2)', clean_line)
+            if boat_match and boat_count < 6:
                 try:
                     boat_num = int(boat_match.group(1))
-                    racer_name = boat_match.group(3).replace(" ", "").replace("　", "").strip()
-                    racer_class = boat_match.group(4)
+                    name = boat_match.group(3).replace(" ", "").replace("　", "").strip()
+                    cls = boat_match.group(4)
                     
-                    # モーター2連率（行の後半にある「数字.数字」を抽出）
+                    # モーター2連率の抽出
                     rates = re.findall(r'(\d+\.\d+)', clean_line)
                     motor_rate = float(rates[-1]) if len(rates) >= 2 else 30.0
                     
                     if not any(r['艇番'] == boat_num for r in racer_list):
                         racer_list.append({
                             "艇番": boat_num,
-                            "選手名": racer_name,
-                            "階級": racer_class,
-                            "展示タイム": 6.70 + (boat_num * 0.01), # 展示初期値
+                            "選手名": name,
+                            "階級": cls,
+                            "展示タイム": 6.70 + (boat_num * 0.01),
                             "チルト": 0.0,
                             "モーター2連率": motor_rate
                         })
+                        boat_count += 1
                 except:
                     pass
 
@@ -118,15 +124,16 @@ def parse_amagasaki_by_pattern(raw_text, target_race):
 # --- UI配置・処理実行 ---
 race_num = st.selectbox("🔮 対象レースを選択", [i for i in range(1, 13)], index=0)
 
-full_text = get_official_dataset(date_url)
-df_racer = parse_amagasaki_by_pattern(full_text, race_num)
+# 尼崎専用テキストをピンポイント取得
+amagasaki_text = get_amagasaki_txt_from_zip(date_url)
+df_racer = parse_race_data(amagasaki_text, race_num)
 
 if df_racer is None:
     st.error("【通信完了】公式データファイルの解析パターンが一致しません。本日、尼崎ボートは非開催（場外発売のみ）の可能性があります。開催スケジュールをご確認ください。")
     st.stop()
 
 st.markdown("### 🛠️ 直前情報の微調整")
-st.caption("全角スペースの壁を突破し、本日開催の【本物のデータ】の自動同期に成功しました！")
+st.caption("尼崎専用データの特定に成功しました！【本物の出走表】が連動しています。")
 
 col_w1, col_w2, col_ex = st.columns(3)
 with col_w1:
@@ -142,7 +149,7 @@ df_racer.loc[df_racer["艇番"]==1, "展示タイム"] = in_display_time
 st.markdown("---")
 st.subheader(f"📋 第 {race_num} レース 出走表・直前気配")
 
-# 出走表テーブル表示
+# テーブル表示
 st.dataframe(df_racer.set_index("艇番"))
 
 # --- 🧠 GANRIKI 予測エンジン ---
@@ -151,7 +158,6 @@ st.subheader("🏁 GANRIKI 展開予測・ガチ買い目")
 
 top_player = df_racer.loc[df_racer["艇番"]==1, "選手名"].values[0]
 in_edge_class = df_racer.loc[df_racer["艇番"]==1, "階級"].values[0]
-in_edge_ex = df_racer.loc[df_racer["艇番"]==1, "展示タイム"].values[0]
 min_ex_time = df_racer["展示タイム"].min()
 best_ex_boats = df_racer[df_racer["展示タイム"] == min_ex_time]["艇番"].tolist()
 
