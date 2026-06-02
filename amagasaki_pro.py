@@ -4,6 +4,7 @@ import requests
 import datetime
 import zipfile
 import io
+import re
 
 # --- ページ基本設定 ---
 st.set_page_config(
@@ -28,90 +29,96 @@ date_str = today.strftime("%Y年%m月%d日")
 
 st.title("🎯 尼崎特化型 リアルタイム予測 GANRIKI")
 st.subheader(f"📅 開催日: {date_str}")
-st.caption("【完全自動・ZIP同期】公式ZIP番組表データ完全解析・連動モデル")
+st.caption("【完全自動・場識別対応】公式ZIP番組表データ完全連動モデル")
 st.markdown("---")
 
-# --- 🛰️ 標準機能で100%解凍！公式ZIPダウンロード＆パース処理 ---
+# --- 🛰️ ZIP内の全ファイルを走査する完全版クローラー ---
 @st.cache_data(ttl=1800)
-def get_official_zip_text(target_date):
-    """公式HPからZIP版の番組表を落とし、標準機能だけで確実にテキストを展開する"""
-    # 💡 LZHではなくZIP版のURL（中身のテキスト構造は完全に同じ）
+def get_official_zip_text_all(target_date):
+    """公式HPからZIPを落とし、中のテキストファイルをすべて結合して1つの巨大なテキストにする"""
     url = f"https://www.boatrace.jp/owpc/pc/extra/data/program/b{target_date}.zip"
+    combined_text = ""
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
             return None
         
-        # Python標準のzipfileモジュールでメモリ上展開（100%エラーフリー）
+        # ZIPファイルをメモリ上で展開
         with zipfile.ZipFile(io.BytesIO(res.content)) as z:
+            # ZIP内の全てのファイルをループで漏れなくチェックする
             for filename in z.namelist():
-                # 番組表テキストをShift-JISでデコード
-                with z.open(filename) as f:
-                    return f.read().decode('cp932', errors='ignore')
+                if filename.endswith('.txt') or filename.startswith('b'):
+                    with z.open(filename) as f:
+                        # 各場のテキストをShift-JISでデコードして結合
+                        combined_text += f.read().decode('cp932', errors='ignore') + "\n"
+        return combined_text if combined_text else None
     except:
         return None
-    return None
 
-def parse_amagasaki_zip(raw_text, target_race):
-    """ZIPから復元したテキストから、尼崎(09#)の指定レースの6名を完全抽出"""
+def parse_amagasaki_zip_perfect(raw_text, target_race):
+    """結合テキストから尼崎(09#)を確実に狙い撃ちして、指定レースの6名を切り出す"""
     if not raw_text:
         return None
         
-    lines = raw_text.split('\r\n')
-    if len(lines) <= 1:
-        lines = raw_text.split('\n')
-        
+    lines = raw_text.split('\n')
     racer_list = []
     is_amagasaki = False
     race_found = False
     boat_count = 0
     
     for line in lines:
-        # 尼崎セクションの開始
-        if "09#" in line or "尼崎" in line:
+        clean_line = line.replace('\r', '')
+        
+        # 尼崎（場コード09#）のエリアが始まったか判定
+        if "09#" in clean_line or ("尼崎" in clean_line and "番組表" in clean_line):
             is_amagasaki = True
             continue
-        # 他の場に移ったら終了
-        if is_amagasaki and "#" in line and "09#" not in line:
-            is_amagasaki = False
-            break
             
+        # 尼崎セクションの中にいる時だけ処理
         if is_amagasaki:
-            # レース番号の行を特定
-            race_label = f"{target_race:2d}R" if target_race >= 10 else f" {target_race}R"
-            if race_label in line and "🎯" not in line and "H" not in line:
-                race_found = True
-                boat_count = 0
-                continue
-                
-            if race_found and "R" in line and race_label not in line:
-                race_found = False
+            # 他の競馬場・競艇場のコード（例: "10#"など）が来たら尼崎は終了
+            if "#" in clean_line and "09#" not in clean_line:
+                is_amagasaki = False
                 break
                 
-            # 1〜6号艇の選手データを公式の固定長（文字位置）ルールで正確に切り抜く
-            if race_found and boat_count < 6:
-                # 艇番が割り振られている行かチェック
-                match = re.match(r'^\s*([1-6])', line)
-                if match:
+            # 目的のレース（例: "11R" または " 1R"）の開始行を探す
+            race_label = f"{target_race:2d}R" if target_race >= 10 else f" {target_race}R"
+            if race_label in clean_line and "🎯" not in clean_line and "🔍" not in clean_line:
+                race_found = True
+                boat_count = 0
+                racer_list = [] # 念のため初期化
+                continue
+                
+            # 該当レースを見つけている最中の処理
+            if race_found:
+                # 別のレース番号（例：次のレースなど）のヘッダーが来たら解析終了
+                if "R" in clean_line and race_label not in clean_line and len(clean_line) < 15:
+                    race_found = False
+                    break
+                    
+                # 1〜6号艇のデータ行を正規表現でガッチリキャッチ
+                # 行の先頭が数字の1〜6で始まっている行を狙い撃ち
+                match = re.match(r'^\s*([1-6])', clean_line)
+                if match and boat_count < 6:
                     try:
                         boat_num = int(match.group(1))
-                        # 公式テキストの厳密なバイト位置からデータを抽出
-                        # 選手名(3〜11文字目付近)、階級(12〜15文字目付近)、モーター2連率(30〜35文字目付近)
-                        racer_name = line[2:10].replace(" ", "").replace("　", "").strip()
-                        racer_class = line[10:14].strip()
                         
-                        # モーター2連率の抽出（公式フォーマットの数字位置を狙い撃ち）
-                        motor_part = line[26:34].strip()
+                        # 公式データの固定長レイアウトを正確にスライス
+                        racer_name = clean_line[2:12].replace(" ", "").replace("　", "").strip()
+                        racer_class = clean_line[12:15].strip()
+                        
+                        # モーター2連率の抽出（行の後半にある2連率の％数字を抽出）
+                        motor_part = clean_line[25:38].strip()
                         motor_rate = 0.0
                         rate_match = re.search(r'(\d+\.\d+)', motor_part)
                         if rate_match:
                             motor_rate = float(rate_match.group(1))
-                        
+                            
                         racer_list.append({
                             "艇番": boat_num,
                             "選手名": racer_name,
                             "階級": racer_class if racer_class in ["A1","A2","B1","B2"] else "B1",
-                            "展示タイム": 6.70 + (boat_num * 0.01), # 直前情報入力用初期値
+                            "展示タイム": 6.70 + (boat_num * 0.01), # 直前調整用の初期値
                             "チルト": 0.0,
                             "モーター2連率": motor_rate
                         })
@@ -123,22 +130,20 @@ def parse_amagasaki_zip(raw_text, target_race):
         return pd.DataFrame(racer_list)
     return None
 
-import re
-
 # --- UI配置・処理実行 ---
 race_num = st.selectbox("🔮 対象レースを選択", [i for i in range(1, 13)], index=0)
 
-# 🚀 ZIPルートによる完全自動取得
-raw_text = get_official_zip_text(date_url)
-df_racer = parse_amagasaki_zip(raw_text, race_num)
+# 🚀 ZIPまるごと走査トリガー発動
+full_text = get_official_zip_text_all(date_url)
+df_racer = parse_amagasaki_zip_perfect(full_text, race_num)
 
-# 万が一のセーフティ（通常は通りません）
+# 万が一、朝が早すぎて公式ファイル自体がまだ無い場合やエラー時の最終バックアップ
 if df_racer is None:
-    st.error("公式ZIPデータの解析に失敗しました。公式HPの更新をお待ちください。")
+    st.error("公式番組表データの解析に失敗しました。本日、尼崎の開催がないか、公式HPのデータが更新中の可能性があります。")
     st.stop()
 
 st.markdown("### 🛠️ 直前情報の微調整")
-st.caption("公式ZIPファイルから本日開催の【本物の選手情報】を100%全自動取得しました！")
+st.caption("公式ZIPから尼崎のテキストファイルを完全に特定し、自動復元に成功しました！")
 
 col_w1, col_w2, col_ex = st.columns(3)
 with col_w1:
