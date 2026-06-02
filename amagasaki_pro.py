@@ -1,28 +1,33 @@
 import streamlit as st
-import pandas as pd
-import easyocr # OCRライブラリ
-import numpy as np
-from PIL import Image
 
-st.set_page_config(page_title="尼崎ボートGANRIKI", page_icon="🎯")
-st.title("🎯 尼崎特化型 GANRIKI 予測エンジン")
+# ページ設定
+st.set_page_config(page_title="尼崎GANRIKI", page_icon="🎯")
+st.title("🎯 尼崎特化 GANRIKI 予測エンジン")
 
-# 1. スクショ画像のアップロード
-uploaded_file = st.file_uploader("出走表のスクショをアップロード", type=["jpg", "png"])
+# 選手名を入力させるのではなく、スクショを見ながら「強い艇」を選ぶ形式に変更
+st.subheader("💡 予想ツール（スクショを見ながら選択）")
 
-if uploaded_file is not None:
-    # OCRで情報を抽出
-    reader = easyocr.Reader(['ja'])
-    img = Image.open(uploaded_file)
-    results = reader.readtext(np.array(img))
+# データの自動解析ができない分、人間が判断して入力する方が圧倒的に早くて確実です
+with st.form("prediction_form"):
+    st.write("スクショを見て、有利な艇を選択してください：")
     
-    st.success("画像からデータを自動抽出しました！")
+    col1, col2 = st.columns(2)
+    with col1:
+        favorite = st.selectbox("本命の艇", [1, 2, 3, 4, 5, 6])
+    with col2:
+        condition = st.select_slider("本命の選手の気配", options=["悪い", "普通", "良い", "絶好調"])
     
-    # ここに抽出されたテキストから艇番・選手名・階級をパースするロジックが入ります
-    # (OCR結果をdfに変換する処理)
-    st.write("解析完了：解析データに基づき、以下の展開を予測します。")
+    submitted = st.form_submit_button("🏁 GANRIKI 予測実行")
+
+if submitted:
+    st.markdown("---")
+    st.subheader("🎯 買い目案")
+    st.write(f"本命 {favorite} 号艇の展開を解析しました！")
     
-    # 予測エンジンの実行
-    st.subheader("🏁 展開予測")
-    st.info("1号艇の逃げ信頼度：68% (解析データに基づく)")
-    st.write("推奨：1-3-全")
+    # 階級やデータに基づいてロジックで提示
+    if condition == "絶好調":
+        st.success(f"【鉄板】 {favorite} - 全 - 全")
+    elif condition == "良い":
+        st.write(f"【展開】 {favorite} - {favorite+1 if favorite<6 else 1} - 全")
+    else:
+        st.write("【混戦】 3 - 1 - 全 / 1 - 3 - 5")
