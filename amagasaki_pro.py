@@ -4,6 +4,7 @@ import requests
 import datetime
 import zipfile
 import io
+import re
 
 # --- ページ基本設定 ---
 st.set_page_config(
@@ -22,20 +23,18 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 today = datetime.date.today()
-# 💡【重要修正】西暦を4桁（20260602）にして公式の正しいURLに合わせる
-date_url = today.strftime("%Y%m%d") 
+date_url = today.strftime("%Y%m%d") # 西暦4桁 "20260602"
 date_str = today.strftime("%Y年%m月%d日")
 
 st.title("🎯 尼崎特化型 リアルタイム予測 GANRIKI")
 st.subheader(f"📅 開催日: {date_str}")
-st.caption("【完全自動】公式4桁西暦URL・完全同期モデル")
+st.caption("【完全自動】不規則空白クレンジング・公式完全同期モデル")
 st.markdown("---")
 
-# --- 🛰️ 公式サーバーからデータを取得する関数 ---
-@st.cache_data(ttl=600)
+# --- 🛰️ 公式サーバーからデータを安全にパースする関数 ---
+@st.cache_data(ttl=300)
 def get_amagasaki_official_df(target_date, target_race):
-    """4桁西暦の正しいURLからZIPをダウンロードし、尼崎のデータを切り出す"""
-    # 💡 正しいURL例: https://www.boatrace.jp/owpc/pc/extra/data/program/b20260602.zip
+    """公式ZIPを落とし、全角半角の不規則な空白の塊を完全に潰して尼崎データを抜き出す"""
     url = f"https://www.boatrace.jp/owpc/pc/extra/data/program/b{target_date}.zip"
     
     try:
@@ -47,7 +46,6 @@ def get_amagasaki_official_df(target_date, target_race):
             for filename in z.namelist():
                 if filename.endswith('.txt') or filename.startswith('b') or filename.startswith('p'):
                     with z.open(filename) as f:
-                        # 行ごとにテキストとして読み込む（Shift-JIS）
                         lines = [line.decode('cp932', errors='ignore') for line in f.readlines()]
                         
                     is_amagasaki = False
@@ -57,49 +55,52 @@ def get_amagasaki_official_df(target_date, target_race):
                     race_label = f"{target_race:2d}R" if target_race >= 10 else f" {target_race}R"
                     
                     for line in lines:
-                        # 尼崎（場コード 09#）のセクションが始まったか判定
-                        if "09#" in line or "尼崎" in line:
+                        clean_line = line.replace('\r', '')
+                        
+                        # 尼崎（場コード 09#）の検知
+                        if "09#" in clean_line or "尼崎" in clean_line:
                             is_amagasaki = True
                             continue
                         
-                        # 尼崎エリアの中で、別の場（10#など）が始まったら終了
-                        if is_amagasaki and "#" in line and "09#" not in line:
+                        # 別の場が始まったら終了
+                        if is_amagasaki and "#" in clean_line and "09#" not in clean_line:
                             is_amagasaki = False
                             continue
                             
                         if is_amagasaki:
-                            # レース番号（例: " 1R"）の検知
-                            if race_label in line and "R" in line[:6]:
+                            # レース番号の検知
+                            if race_label in clean_line and "R" in clean_line[:6]:
                                 race_found = True
                                 racer_list = []
                                 continue
                                 
-                            # 次のレースの行が来たら現在のレースは終了
-                            if race_found and "R" in line[:6] and race_label not in line:
+                            # 次のレースの行が来たら終了
+                            if race_found and "R" in clean_line[:6] and race_label not in clean_line:
                                 race_found = False
                                 if len(racer_list) == 6:
                                     break
                                 continue
                                 
                             if race_found:
-                                # 先頭に艇番（1〜6）があるか確認
-                                strip_line = line.strip()
-                                if strip_line and strip_line[0] in ["1", "2", "3", "4", "5", "6"]:
+                                # 💡【最重要処理】全角スペース・半角スペースが何個連続していようが、すべて単一の「,」に強制置換する
+                                # これにより、不規則な空白の罠を完全に破壊します
+                                normalized_line = re.sub(r'[\s　]+', ',', clean_line.strip())
+                                parts = normalized_line.split(',')
+                                
+                                # 行の先頭が艇番（1〜6）であることを綺麗になった配列から確認
+                                if parts and parts[0] in ["1", "2", "3", "4", "5", "6"]:
                                     try:
-                                        boat_num = int(strip_line[0])
+                                        boat_num = int(parts[0])
                                         
-                                        # 不要なスペースを綺麗に整理しながらデータをパース
-                                        parts = [p for p in strip_line.split(' ') if p]
+                                        # 区切られた配列から、選手名と階級を安全に狙い撃ち
+                                        # [0]:艇番, [1]:登録番号, [2]:選手名, [3]:階級
+                                        racer_name = parts[2].strip()
+                                        racer_class = parts[3].strip()
                                         
-                                        # 選手名と階級を安全に取得
-                                        racer_name = parts[2].replace("　", "").strip() if len(parts) > 2 else "選手"
-                                        racer_class = parts[3].strip() if len(parts) > 3 else "B1"
-                                        
-                                        # 階級が異常な場合はセーフティ
                                         if not any(c in racer_class for c in ["A1", "A2", "B1", "B2"]):
                                             racer_class = "B1"
                                             
-                                        # モーター2連率を後半のパーツから探す（小数点があるもの）
+                                        # モーター2連率を配列の中から自動探索（小数点を含むパーツを探す）
                                         motor_rate = 35.0
                                         for p in parts[4:]:
                                             if "." in p:
@@ -130,7 +131,7 @@ def get_amagasaki_official_df(target_date, target_race):
 # --- UI配置・処理実行 ---
 race_num = st.selectbox("🔮 対象レースを選択", [i for i in range(1, 13)], index=0)
 
-# 正しいURLで公式データを直接取得
+# 強力クレンジングパースを実行
 df_racer = get_amagasaki_official_df(date_url, race_num)
 
 if df_racer is None:
@@ -138,7 +139,7 @@ if df_racer is None:
     st.stop()
 
 st.markdown("### 🛠️ 直前情報の微調整")
-st.caption("正しい公式サーバーURLとの同期に成功しました！本物の出走表です。")
+st.caption("公式データの空白の罠を完全破壊し、本物の出走表の同期に成功しました！")
 
 col_w1, col_w2, col_ex = st.columns(3)
 with col_w1:
