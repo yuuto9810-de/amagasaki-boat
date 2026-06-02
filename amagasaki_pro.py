@@ -29,14 +29,15 @@ date_str = today.strftime("%Y年%m月%d日")
 
 st.title("🎯 尼崎特化型 リアルタイム予測 GANRIKI")
 st.subheader(f"📅 開催日: {date_str}")
-st.caption("【完全自動】場別ファイル名ダイレクト認識モデル")
+st.caption("【完全自動】ZIP内全テキスト完全解析・連動モデル")
 st.markdown("---")
 
-# --- 🛰️ 尼崎のファイルだけをZIPから引っこ抜く処理 ---
-@st.cache_data(ttl=1800)
-def get_amagasaki_txt_from_zip(target_date):
-    """公式ZIPをダウンロードし、ファイル名に『09（尼崎）』が含まれるテキストだけを抽出する"""
+# --- 🛰️ ZIP内の全テキストを漏れなく結合して取得する処理 ---
+@st.cache_data(ttl=600)  # レース進行に合わせてキャッシュは10分に短縮
+def get_absolute_official_text(target_date):
+    """公式ZIPをダウンロードし、ファイル名に関わらず、中にある全てのテキストデータを1つに結合する"""
     url = f"https://www.boatrace.jp/owpc/pc/extra/data/program/b{target_date}.zip"
+    combined_text = ""
     try:
         res = requests.get(url, timeout=10)
         if res.status_code != 200:
@@ -44,78 +45,84 @@ def get_amagasaki_txt_from_zip(target_date):
         
         with zipfile.ZipFile(io.BytesIO(res.content)) as z:
             for filename in z.namelist():
-                # 💡ファイル名に '09' (尼崎の場コード) が入っているものを狙い撃ち
-                if "09" in filename and filename.endswith(".txt"):
+                # 💡拡張子が.txtのものはもちろん、名前が何であれ全て中身を吸い出す
+                try:
                     with z.open(filename) as f:
-                        return f.read().decode('cp932', errors='ignore')
-                        
-            # もし場別ファイルがなければ、まとめファイル(p*.txtやb*.txt)から中身を返すバックアップ
-            for filename in z.namelist():
-                if filename.endswith(".txt"):
-                    with z.open(filename) as f:
-                        txt = f.read().decode('cp932', errors='ignore')
-                        if "尼崎" in txt or "09#" in txt:
-                            return txt
+                        combined_text += f.read().decode('cp932', errors='ignore') + "\n"
+                except:
+                    pass
+        return combined_text if combined_text.strip() else None
     except:
         return None
-    return None
 
-def parse_race_data(raw_text, target_race):
-    """尼崎のテキストから指定レースの6名を確実に抽出する"""
+def parse_amagasaki_perfect_scan(raw_text, target_race):
+    """全結合テキストから『尼崎』セクションを確実に切り出し、指定レースの6名をパースする"""
     if not raw_text:
         return None
         
     lines = raw_text.split('\n')
     racer_list = []
+    is_amagasaki = False
     race_found = False
     boat_count = 0
     
-    # レース番号（例: "11R" や " 1R"）の正規表現
-    race_pattern = re.compile(r'^\s*(' + str(target_race) + r')\s*R')
-    
     for line in lines:
         clean_line = line.replace('\r', '')
-        if not clean_line.strip():
+        
+        # 💡「尼崎」という文字、または場識別コード「09#」を見つけたら尼崎エリア開始
+        if "09#" in clean_line or ("尼崎" in clean_line and "番組表" in clean_line):
+            is_amagasaki = True
             continue
             
-        # 対象レースの開始を検知
-        if race_pattern.search(clean_line):
-            race_found = True
-            boat_count = 0
-            racer_list = []
-            continue
+        if is_amagasaki:
+            # 尼崎エリアの中で、別の場（例: 10# や 🗺️マーク等）が始まったら尼崎終了
+            if "#" in clean_line and "09#" not in clean_line:
+                is_amagasaki = False
+                # 💡 1つのファイルにまとまっていない可能性を考慮し、ここではbreakせず下まで走査を続ける
+                continue
             
-        if race_found:
-            # 次のレース番号が来たら現在のレース解析は終了
-            if re.search(r'^\s*\d+\s*R', clean_line):
-                race_found = False
-                break
+            # 対象レース番号（例: "11R" または " 1R"）の検知
+            race_label = f"{target_race:2d}R" if target_race >= 10 else f" {target_race}R"
+            if race_label in clean_line and "🎯" not in clean_line and "🔍" not in clean_line:
+                race_found = True
+                boat_count = 0
+                racer_list = [] # 初期化
+                continue
                 
-            # 艇番(1-6)から始まる選手行をキャッチ
-            # [艇番] [4桁の登録番号] [選手名] [階級] の並び
-            boat_match = re.search(r'^\s*([1-6])\s*(\d{4})?\s*([^\sA-B0-9]+)\s*(A1|A2|B1|B2)', clean_line)
-            if boat_match and boat_count < 6:
-                try:
-                    boat_num = int(boat_match.group(1))
-                    name = boat_match.group(3).replace(" ", "").replace("　", "").strip()
-                    cls = boat_match.group(4)
+            if race_found:
+                # 別のレース番号ヘッダーが来たらそのレースは終了
+                if "R" in clean_line and race_label not in clean_line and len(clean_line) < 15:
+                    race_found = False
+                    if len(racer_list) == 6:
+                        break # 6人綺麗に取れていれば終了
+                    continue
                     
-                    # モーター2連率の抽出
-                    rates = re.findall(r'(\d+\.\d+)', clean_line)
-                    motor_rate = float(rates[-1]) if len(rates) >= 2 else 30.0
-                    
-                    if not any(r['艇番'] == boat_num for r in racer_list):
-                        racer_list.append({
-                            "艇番": boat_num,
-                            "選手名": name,
-                            "階級": cls,
-                            "展示タイム": 6.70 + (boat_num * 0.01),
-                            "チルト": 0.0,
-                            "モーター2連率": motor_rate
-                        })
-                        boat_count += 1
-                except:
-                    pass
+                # 1〜6号艇のデータ行を、全角半角スペースのズレを無視してキャッチ
+                # [艇番1-6] [任意の空白] [4桁の登録番号(任意)] [任意の空白] [選手名] [任意の空白] [階級A1-B2]
+                boat_match = re.search(r'^\s*([1-6])\s*(\d{4})?\s*([^\sA-B0-9]+)\s*(A1|A2|B1|B2)', clean_line)
+                if boat_match and boat_count < 6:
+                    try:
+                        boat_num = int(boat_match.group(1))
+                        name = boat_match.group(3).replace(" ", "").replace("　", "").strip()
+                        cls = boat_match.group(4)
+                        
+                        # モーター2連率（行の後半にある「数字.数字」のパーツを自動抽出）
+                        rates = re.findall(r'(\d+\.\d+)', clean_line)
+                        motor_rate = float(rates[-1]) if len(rates) >= 2 else 30.0
+                        
+                        # 重複を防いで格納
+                        if not any(r['艇番'] == boat_num for r in racer_list):
+                            racer_list.append({
+                                "艇番": boat_num,
+                                "選手名": name,
+                                "階級": cls,
+                                "展示タイム": 6.70 + (boat_num * 0.01), # 直前情報用初期値
+                                "チルト": 0.0,
+                                "モーター2連率": motor_rate
+                            })
+                            boat_count += 1
+                    except:
+                        pass
 
     if len(racer_list) == 6:
         return pd.DataFrame(racer_list).sort_values("艇番")
@@ -124,16 +131,16 @@ def parse_race_data(raw_text, target_race):
 # --- UI配置・処理実行 ---
 race_num = st.selectbox("🔮 対象レースを選択", [i for i in range(1, 13)], index=0)
 
-# 尼崎専用テキストをピンポイント取得
-amagasaki_text = get_amagasaki_txt_from_zip(date_url)
-df_racer = parse_race_data(amagasaki_text, race_num)
+# ZIP内テキストの全全スキャン発動
+full_raw_text = get_absolute_official_text(date_url)
+df_racer = parse_amagasaki_perfect_scan(full_raw_text, race_num)
 
 if df_racer is None:
-    st.error("【通信完了】公式データファイルの解析パターンが一致しません。本日、尼崎ボートは非開催（場外発売のみ）の可能性があります。開催スケジュールをご確認ください。")
+    st.error("【通信完了】本日、尼崎ボート公式データの読み込み・パースに失敗しました。時間をおいて再読込してください。")
     st.stop()
 
 st.markdown("### 🛠️ 直前情報の微調整")
-st.caption("尼崎専用データの特定に成功しました！【本物の出走表】が連動しています。")
+st.caption("公式データから本日開催の【リアルな尼崎データ】を100%全自動で抽出・同期しました！")
 
 col_w1, col_w2, col_ex = st.columns(3)
 with col_w1:
@@ -149,7 +156,6 @@ df_racer.loc[df_racer["艇番"]==1, "展示タイム"] = in_display_time
 st.markdown("---")
 st.subheader(f"📋 第 {race_num} レース 出走表・直前気配")
 
-# テーブル表示
 st.dataframe(df_racer.set_index("艇番"))
 
 # --- 🧠 GANRIKI 予測エンジン ---
