@@ -1,38 +1,39 @@
 import streamlit as st
 import pandas as pd
 
-st.set_page_config(page_title="尼崎GANRIKI 解析エンジン", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="尼崎GANRIKI", page_icon="🎯", layout="wide")
 st.title("🎯 GANRIKI 3連単・ガチ勝負")
 
-# 気象情報
+# 気象情報（シミュレーション）
 weather = {"風向": "追い風", "風速": 2.0} 
 st.info(f"🛰️ 現在の尼崎：{weather['風向']} {weather['風速']}m")
 
-# 手動入力：表形式で数字を入力し、階級だけ選択式にする
+# データ入力
 st.subheader("📋 選手データ入力")
 
 # 階級の選択肢
 class_options = ["A1", "A2", "B1", "B2"]
 
-# 入力用データフレームの初期化
+# 入力用データフレーム（初期化）
 if 'df' not in st.session_state:
     st.session_state.df = pd.DataFrame({
         "艇番": [1, 2, 3, 4, 5, 6],
         "階級": ["B1"]*6,
         "モーター": [30.0]*6,
         "ボート": [30.0]*6,
-        "結果(着順)": [0]*6
+        "1着": [False]*6,
+        "2着": [False]*6,
+        "3着": [False]*6
     })
 
-# 階級の更新用UI（6つのセレクトボックス）
-col1, col2, col3, col4, col5, col6 = st.columns(6)
-cols = [col1, col2, col3, col4, col5, col6]
+# 階級の選択UI（横並び）
+cols = st.columns(6)
 for i in range(6):
     st.session_state.df.at[i, "階級"] = cols[i].selectbox(f"{i+1}号艇", class_options, key=f"c{i}")
 
-# 数字入力（表形式）
-st.session_state.df[["モーター", "ボート", "結果(着順)"]] = st.data_editor(
-    st.session_state.df[["モーター", "ボート", "結果(着順)"]], 
+# 数値と結果の入力（表形式）
+st.session_state.df[["モーター", "ボート", "1着", "2着", "3着"]] = st.data_editor(
+    st.session_state.df[["モーター", "ボート", "1着", "2着", "3着"]], 
     hide_index=True
 )
 
@@ -58,5 +59,5 @@ if st.button("🚀 3連単を算出"):
     # 買い目表示
     c1, c2, c3 = st.columns(3)
     c1.subheader("✅ 本線"); c1.metric("3連単", f"{t1}-{t2}-{t3}"); c1.write("理由: 総合指数トップ。追い風でイン鉄板。")
-    c2.subheader("⚡ 中穴"); c2.metric("3連単", f"{t1}-{t3}-{t2}"); c2.write("理由: モーター機力重視の差しパターン。")
-    c3.subheader("🌋 大穴"); c3.metric("3連単", f"{t2}-{t1}-{t4}"); c3.write("理由: インのスタート遅れを想定した大逆転。")
+    c2.subheader("⚡ 中穴"); c2.metric("3連単", f"{t1}-{t3}-{t2}"); c2.write("理由: 機力重視の差しパターン。")
+    c3.subheader("🌋 大穴"); c3.metric("3連単", f"{t2}-{t1}-{t4}"); c3.write("理由: スタート後手による逆転。")
