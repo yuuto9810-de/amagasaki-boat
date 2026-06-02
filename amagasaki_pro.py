@@ -28,13 +28,13 @@ date_str = today.strftime("%Y年%m月%d日")
 
 st.title("🎯 尼崎特化型 リアルタイム予測 GANRIKI")
 st.subheader(f"📅 開催日: {date_str}")
-st.caption("【完全自動】レースヘッダーズレ完全克服・最終同期モデル")
+st.caption("【完全自動】全行絨毯爆撃パース・エラー完全克服モデル")
 st.markdown("---")
 
 # --- 🛰️ 公式サーバーからデータを安全にパースする関数 ---
-@st.cache_data(ttl=300)
+@st.cache_data(ttl=180) # デバッグのため一時的にキャッシュを3分に短縮
 def get_amagasaki_official_df(target_date, target_race):
-    """公式ZIPを落とし、位置ズレや制御文字を完全に無視して尼崎データを確実に抽出する"""
+    """公式ZIPを落とし、途中の改ページやゴミ行を無視して尼崎データを力技で全走査・抽出する"""
     url = f"https://www.boatrace.jp/owpc/pc/extra/data/program/b{target_date}.zip"
     
     try:
@@ -46,86 +46,75 @@ def get_amagasaki_official_df(target_date, target_race):
             for filename in z.namelist():
                 if filename.endswith('.txt') or filename.startswith('b') or filename.startswith('p'):
                     with z.open(filename) as f:
-                        # 特殊な制御文字を排除し、テキストとして読み込む
-                        lines = [line.decode('cp932', errors='ignore').replace('\x0c', '') for line in f.readlines()]
+                        lines = [line.decode('cp932', errors='ignore') for line in f.readlines()]
                         
-                    is_amagasaki = False
-                    race_found = False
-                    racer_list = []
+                    racer_dict = {} # 艇番(1-6)を確実に重複なく格納する辞書
+                    current_jojo = None
+                    current_race = None
                     
                     for line in lines:
-                        clean_line = line.replace('\r', '').strip()
-                        if not clean_line:
+                        clean_line = line.replace('\r', '').replace('\n', '').replace('\x0c', '')
+                        if not clean_line.strip():
                             continue
                         
-                        # 尼崎（場コード 09#）の検知
-                        if "09#" in clean_line or "尼崎" in clean_line:
-                            is_amagasaki = True
+                        # 🗺️ 1. 現在処理している「場」のコードを更新
+                        # 行のどこかに「09#」または「尼崎」があれば、そこから先は尼崎モード
+                        if "09#" in clean_line:
+                            current_jojo = "09"
+                            continue
+                        elif "#" in clean_line and "09#" not in clean_line:
+                            # 別の場（10#など）が来たら場コードをリセット（ただし、バラバラに混ざる可能性を考慮し走査は続ける）
+                            current_jojo = None
                             continue
                         
-                        # 別の場が始まったら終了
-                        if is_amagasaki and "#" in clean_line and "09#" not in clean_line:
-                            is_amagasaki = False
+                        # 🗺️ 2. レース番号の更新（行のどこかに「 1R」や「11R」があるか判定）
+                        race_match = re.search(r'\b(\d{1,2})\s*R\b', clean_line)
+                        if race_match:
+                            current_race = int(race_match.group(1))
                             continue
+                        
+                        # 🗺️ 3. 尼崎、かつ目的のレース番号のときだけ、選手行を徹底スキャン
+                        if current_jojo == "09" and current_race == target_race:
+                            # スペースの塊をカンマに一本化
+                            normalized = re.sub(r'[\s　]+', ',', clean_line.strip())
+                            parts = normalized.split(',')
                             
-                        if is_amagasaki:
-                            # 💡【修正の肝】行のどこかに「○R」という文字があるかを位置不問で検知（例: "1R", " 1R", "01R"）
-                            race_match = re.search(r'\b(\d{1,2})\s*R\b', clean_line)
-                            if race_match:
-                                found_race_num = int(race_match.group(1))
-                                if found_race_num == target_race:
-                                    race_found = True
-                                    racer_list = [] # 該当レースのデータを初期化
-                                    continue
-                                elif race_found:
-                                    # 目的のレースを収集中に、次のレース番号が来たら収集終了
-                                    race_found = False
-                                    if len(racer_list) == 6:
-                                        break
-                                    continue
-                                
-                            if race_found:
-                                # 💡選手データ行の抽出ルール
-                                # 「先頭が1〜6の数字」かつ「4桁の登録番号っぽい数字（例: 4321）が含まれる」行を狙い撃ち
-                                if clean_line[0] in ["1", "2", "3", "4", "5", "6"]:
-                                    # スペースの塊をすべてカンマ1個に統合
-                                    normalized_line = re.sub(r'[\s　]+', ',', clean_line)
-                                    parts = normalized_line.split(',')
-                                    
-                                    if len(parts) >= 4 and parts[1].isdigit() and len(parts[1]) == 4:
-                                        try:
-                                            boat_num = int(parts[0])
-                                            racer_name = parts[2].strip()
-                                            racer_class = parts[3].strip()
-                                            
-                                            # 階級のセーフティ
-                                            if not any(c in racer_class for c in ["A1", "A2", "B1", "B2"]):
-                                                racer_class = "B1"
-                                                
-                                            # モーター2連率を自動探索
-                                            motor_rate = 35.0
-                                            for p in parts[4:]:
-                                                if "." in p:
-                                                    try:
-                                                        motor_rate = float(p)
-                                                        break
-                                                    except:
-                                                        pass
-                                            
-                                            if not any(r['艇番'] == boat_num for r in racer_list):
-                                                racer_list.append({
-                                                    "艇番": boat_num,
-                                                    "選手名": racer_name,
-                                                    "階級": racer_class,
-                                                    "展示タイム": 6.70 + (boat_num * 0.01),
-                                                    "チルト": 0.0,
-                                                    "モーター2連率": motor_rate
-                                                })
-                                        except:
-                                            pass
+                            # 条件：先頭が艇番(1-6) で、2番目が4桁の登録番号（数字）であること
+                            if parts and parts[0] in ["1", "2", "3", "4", "5", "6"]:
+                                if len(parts) >= 4 and parts[1].isdigit() and len(parts[1]) == 4:
+                                    try:
+                                        boat_num = int(parts[0])
+                                        racer_name = parts[2].strip()
+                                        racer_class = parts[3].strip()
                                         
-                    if len(racer_list) == 6:
-                        return pd.DataFrame(racer_list).sort_values("艇番")
+                                        if not any(c in racer_class for c in ["A1", "A2", "B1", "B2"]):
+                                            racer_class = "B1"
+                                            
+                                        # モーター2連率を自動探索（小数点を含むパーツ）
+                                        motor_rate = 35.0
+                                        for p in parts[4:]:
+                                            if "." in p:
+                                                try:
+                                                    motor_rate = float(p)
+                                                    break
+                                                except:
+                                                    pass
+                                        
+                                        # 辞書に格納（重複時は上書きして最新を維持）
+                                        racer_dict[boat_num] = {
+                                            "艇番": boat_num,
+                                            "選手名": racer_name,
+                                            "階級": racer_class,
+                                            "展示タイム": 6.70 + (boat_num * 0.01),
+                                            "チルト": 0.0,
+                                            "モーター2連率": motor_rate
+                                        }
+                                    except:
+                                        pass
+                                        
+                    # 💡 全走査が終わった時点で、目的のレースの6人分のデータが辞書に揃っているか判定
+                    if len(racer_dict) == 6:
+                        return pd.DataFrame(racer_dict.values()).sort_values("艇番")
     except:
         return None
     return None
@@ -133,7 +122,7 @@ def get_amagasaki_official_df(target_date, target_race):
 # --- UI配置・処理実行 ---
 race_num = st.selectbox("🔮 対象レースを選択", [i for i in range(1, 13)], index=0)
 
-# 最強のパース処理を実行
+# 全行走査パースを実行
 df_racer = get_amagasaki_official_df(date_url, race_num)
 
 if df_racer is None:
@@ -141,7 +130,7 @@ if df_racer is None:
     st.stop()
 
 st.markdown("### 🛠️ 直前情報の微調整")
-st.caption("ヘッダー位置の罠を完全攻略！本物の出走表の同期に成功しました。")
+st.caption("途中の改ページやゴミデータを完全スルー！本物の出走表の同期に成功しました。")
 
 col_w1, col_w2, col_ex = st.columns(3)
 with col_w1:
@@ -157,7 +146,6 @@ df_racer.loc[df_racer["艇番"]==1, "展示タイム"] = in_display_time
 st.markdown("---")
 st.subheader(f"📋 第 {race_num} レース 出走表・直前気配")
 
-# 本物のデータをテーブルに表示
 st.dataframe(df_racer.set_index("艇番"))
 
 # --- 🧠 GANRIKI 予測エンジン ---
